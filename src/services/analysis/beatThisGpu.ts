@@ -53,7 +53,21 @@ interface Reply {
     scope?: 'device' | 'model';
 }
 
-interface Logits { beat: Float32Array[]; downbeat: Float32Array[] }
+/**
+ * Per spectrogram frame: percussive and total energy (HPSS, beatThisWgsl/percussive.ts), for the beat
+ * accents' `rhythmic` gate. Declared here rather than imported, for the same reason as CHUNK_FRAMES.
+ */
+export interface PercussiveEnergyFrames {
+    percussive: Float32Array;
+    total: Float32Array;
+}
+
+interface Logits {
+    beat: Float32Array[];
+    downbeat: Float32Array[];
+    /** Present when asked for and computed; its failure does not fail the logits. */
+    percussive?: PercussiveEnergyFrames;
+}
 
 let worker: Worker | null = null;
 /** Per model: resolves once the worker has it built; absent when it must be asked for again. */
@@ -175,20 +189,54 @@ export const probeBeatThisGpu = (): Promise<boolean> => {
  * Logits for these chunks from the WebGPU runtime, or null to have them run on the CPU.
  *
  * Null without trying when there is no WebGPU export on disk, and when this machine has already
- * failed to run it.
+ * failed to run it. With `percussiveOf` (the whole spectrogram the chunks were cut from), its
+ * per-frame percussive energy is computed in the same run and comes back with the logits.
  */
 export const runBeatThisGpu = (
     chunks: Array<{ data: Float32Array; frames: number }>,
     model: BeatThisModel = 'beat_this',
+    percussiveOf?: { data: Float32Array; frames: number },
 ): Promise<Logits | null> => {
     if (unsupported || failedModels.has(model) || typeof window === 'undefined' || typeof Worker === 'undefined') return Promise.resolve(null);
     if (!chunks.length || chunks.some(chunk => chunk.frames < 1 || chunk.frames > CHUNK_FRAMES)) return Promise.resolve(null);
-    const run = queue.then(() => runNow(chunks, model));
+    const run = queue.then(() => runNow(chunks, model, percussiveOf));
     queue = run.catch(() => null);
     return run;
 };
 
-const runNow = async (chunks: Array<{ data: Float32Array; frames: number }>, model: BeatThisModel): Promise<Logits | null> => {
+/**
+ * The per-frame percussive energy of a whole spectrogram on its own, for a track whose beats are
+ * already stored (the accents filled in later). Needs only the device, no model. Null when this
+ * machine has no usable WebGPU or the run failed.
+ */
+export const runPercussiveEnergyGpu = (mel: { data: Float32Array; frames: number }): Promise<PercussiveEnergyFrames | null> => {
+    if (unsupported || typeof window === 'undefined' || typeof Worker === 'undefined' || mel.frames < 1) return Promise.resolve(null);
+    const run = queue.then(async (): Promise<PercussiveEnergyFrames | null> => {
+        if (unsupported || !spawn()) return null;
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = null;
+        const data = Float32Array.from(mel.data.subarray(0, mel.frames * 128));
+        const reply = await ask({ kind: 'percussive', mel: data, frames: mel.frames }, [data.buffer]);
+        if (worker) idleTimer = setTimeout(drop, IDLE_MS);
+        if (reply.error) {
+            console.warn(`[beat-this-gpu] percussive energy unavailable: ${reply.error}`);
+            if (reply.scope === 'device') {
+                unsupported = true;
+                drop();
+            }
+            return null;
+        }
+        return reply.result as PercussiveEnergyFrames;
+    });
+    queue = run.catch(() => null);
+    return run;
+};
+
+const runNow = async (
+    chunks: Array<{ data: Float32Array; frames: number }>,
+    model: BeatThisModel,
+    percussiveOf?: { data: Float32Array; frames: number },
+): Promise<Logits | null> => {
     if (unsupported || failedModels.has(model)) return null;
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = null;
@@ -204,7 +252,13 @@ const runNow = async (chunks: Array<{ data: Float32Array; frames: number }>, mod
     }
     // Copied, not transferred: the caller still owns the spectrogram it chunked.
     const data = chunks.map(chunk => Float32Array.from(chunk.data.subarray(0, chunk.frames * 128)));
-    const reply = await ask({ kind: 'run', model, chunks: data }, data.map(chunk => chunk.buffer));
+    const percussive = percussiveOf
+        ? { mel: Float32Array.from(percussiveOf.data.subarray(0, percussiveOf.frames * 128)), frames: percussiveOf.frames }
+        : undefined;
+    const reply = await ask(
+        { kind: 'run', model, chunks: data, percussive },
+        [...data.map(chunk => chunk.buffer), ...(percussive ? [percussive.mel.buffer] : [])],
+    );
     if (reply.error) {
         console.warn(`[beat-this-gpu] run failed, falling back to the CPU for this track: ${reply.error}`);
         drop();

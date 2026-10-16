@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { BEAT_ACCENTS_VERSION, computeBeatAccents, isBeatAccents, resolveTrackScale, TRACK_SCALE_MIN } from '@/services/analysis/beatAccents';
+import {
+    BEAT_ACCENTS_VERSION,
+    computeBeatAccents,
+    isBeatAccents,
+    PERCUSSIVE_GATE,
+    resolveBarPercussiveShares,
+    resolveRhythmicBeats,
+    resolveTrackScale,
+    TRACK_SCALE_MIN,
+} from '@/services/analysis/beatAccents';
 import { BEAT_THIS_FPS, MEL_BANDS, melBandCentresHz } from '@/services/analysis/beatThis';
 
 // test/unit/analysis/beatAccents.test.ts
@@ -89,13 +98,58 @@ describe('resolveTrackScale', () => {
 });
 
 describe('isBeatAccents', () => {
-    const valid = { v: BEAT_ACCENTS_VERSION, impact: [0.5], low: [0.2], mid: [0.3], high: [0.5], trackScale: 0.8 };
+    const valid = { v: BEAT_ACCENTS_VERSION, impact: [0.5], low: [0.2], mid: [0.3], high: [0.5], rhythmic: [1], trackScale: 0.8 };
     it('rejects another version, length or range', () => {
         expect(isBeatAccents(valid, 1)).toBe(true);
         expect(isBeatAccents(valid, 2)).toBe(false);
         expect(isBeatAccents({ ...valid, v: BEAT_ACCENTS_VERSION + 1 }, 1)).toBe(false);
         expect(isBeatAccents({ ...valid, impact: [1.5] }, 1)).toBe(false);
         expect(isBeatAccents({ ...valid, trackScale: 0.1 }, 1)).toBe(false);
+        // A list from before the gate (version 1) has no `rhythmic` and is measured again.
+        const { rhythmic: _rhythmic, ...withoutGate } = valid;
+        expect(isBeatAccents(withoutGate, 1)).toBe(false);
         expect(isBeatAccents(null, 1)).toBe(false);
+    });
+});
+
+/** Per-frame energy (50 fps) where each second has the given percussive share. */
+const energyOf = (sharesPerSecond: number[]) => {
+    const frames = sharesPerSecond.length * BEAT_THIS_FPS;
+    const percussive = new Float32Array(frames);
+    const total = new Float32Array(frames).fill(1);
+    sharesPerSecond.forEach((share, second) => percussive.fill(share, second * BEAT_THIS_FPS, (second + 1) * BEAT_THIS_FPS));
+    return { percussive, total };
+};
+
+describe('rhythm gate', () => {
+    // 4 beats a second, a bar a second: 12 bars, the first two sustained sound only.
+    const beats = beatsEvery(0.25, 48, 0);
+    const downbeats = beats.filter((_, index) => index % 4 === 0);
+    const shares = [0.03, 0.1, 0.3, 0.32, 0.28, 0.3, 0.31, 0.2, 0.3, 0.29, 0.33, 0.3];
+
+    it('measures each bar\'s percussive share', () => {
+        const bars = resolveBarPercussiveShares(energyOf(shares), beats, downbeats);
+        expect(bars.starts).toEqual(downbeats.map((_, bar) => bar * 4));
+        bars.shares.forEach((share, bar) => expect(share).toBeCloseTo(shares[bar]));
+    });
+
+    it('turns off the beats of bars well under the track\'s usual share, and only those', () => {
+        const rhythmic = resolveRhythmicBeats(energyOf(shares), beats, downbeats);
+        expect(rhythmic.slice(0, 8)).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
+        // 0.2 of a 0.3 median is above PERCUSSIVE_GATE: a sparse bar stays on.
+        expect(0.2 / 0.3).toBeGreaterThan(PERCUSSIVE_GATE);
+        expect(rhythmic.slice(8).every(value => value === 1)).toBe(true);
+    });
+
+    it('falls back to bars of four beats without downbeats, and keeps everything without energy', () => {
+        expect(resolveRhythmicBeats(energyOf(shares), beats, []).slice(0, 8)).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
+        expect(resolveRhythmicBeats(null, beats, downbeats).every(value => value === 1)).toBe(true);
+        expect(resolveRhythmicBeats(energyOf([0.01, 0.3]), beats.slice(0, 8), downbeats.slice(0, 2))).toEqual([1, 1, 1, 1, 1, 1, 1, 1]);
+    });
+
+    it('is carried in the accents', () => {
+        const mel = makeMel(12, beats.map(t => ({ t, range: 'low' as const, amount: 1 })));
+        expect(computeBeatAccents(mel, beats, downbeats, energyOf(shares)).rhythmic.slice(0, 9)).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        expect(computeBeatAccents(mel, beats, downbeats).rhythmic.every(value => value === 1)).toBe(true);
     });
 });

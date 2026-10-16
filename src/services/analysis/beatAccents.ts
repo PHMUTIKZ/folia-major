@@ -1,4 +1,5 @@
 import { BEAT_THIS_FPS, MEL_BANDS, melBandCentresHz, type MelSpectrogram } from './beatThis';
+import type { PercussiveEnergyFrames } from './beatThisGpu';
 
 // src/services/analysis/beatAccents.ts
 // What each beat sounds like, for 智能动感模式: how hard it hits, whether the hit is low, mid or high,
@@ -13,13 +14,20 @@ import { BEAT_THIS_FPS, MEL_BANDS, melBandCentresHz, type MelSpectrogram } from 
 //   trackScale  0.45..1, from how much the track's beats rise at all (their median rise); a ballad
 //               whose beats barely rise gets less motion. Only ever lowers: the user's strength stays
 //               the ceiling.
+//   rhythmic    per beat, 0 when its bar has next to no percussive sound - an intro of horns or pads
+//               alone - so no beat FX fire there. A bar's percussive share of the energy comes from
+//               HPSS on the same spectrogram, run on the GPU with the model (beatThisWgsl/
+//               percussive.ts); a bar is off below PERCUSSIVE_GATE of the track's median share. From
+//               the demo's method 9 (「无节奏关」), where it took out exactly the horn intro of
+//               裏表ラバーズ and kept every bar once the drums come in. Without the energy (the GPU
+//               could not run it) every beat is rhythmic, as before the gate.
 //
 // Idea from Mineradio (GPL-3.0, github.com/XxHuberrr/Mineradio-paused, dj-analyzer.js): give every
 // beat a strength and a character instead of firing them all alike. Nothing of its code is used - it
 // measures only a 32-178 Hz band and derives the "character" from the beat's index modulo four.
 
 /** Bumped when the measurement changes; a stored list of another version is recomputed. */
-export const BEAT_ACCENTS_VERSION = 1;
+export const BEAT_ACCENTS_VERSION = 2;
 
 export interface BeatAccents {
     v: number;
@@ -28,6 +36,8 @@ export interface BeatAccents {
     low: number[];
     mid: number[];
     high: number[];
+    /** 1 when the beat's bar has rhythm, 0 when it is sustained sound only (no beat FX there). */
+    rhythmic: number[];
     trackScale: number;
 }
 
@@ -56,6 +66,17 @@ export const TRACK_SCALE_MIN = 0.45;
  */
 const TRACK_SCALE_RISE_LOW = 0.1;
 const TRACK_SCALE_RISE_HIGH = 0.35;
+/**
+ * A bar whose percussive share is under this share of the track's median bar has no rhythm. Measured
+ * on the two test tracks: the horn intro of 裏表ラバーズ at 0.10 and 0.31 of the median, every other
+ * bar of both tracks at 0.54 or more (the sparse-drum breakdowns of パラジクロロベンゼン ~0.6). The
+ * demo's 0.5 sits too close to 0.54 on the mel bands; 0.45 is the middle of the gap.
+ */
+export const PERCUSSIVE_GATE = 0.45;
+/** Fewer bars than this and there is no "usual" share to compare with: every bar is rhythmic. */
+const MIN_BARS = 4;
+/** Bars without downbeats to go by: groups of this many beats. */
+const FALLBACK_BAR_BEATS = 4;
 
 interface BandTracks {
     low: Float32Array;
@@ -126,6 +147,67 @@ const median = (values: readonly number[]): number => percentile([...values].sor
 
 const round3 = (value: number) => Math.round(value * 1000) / 1000;
 
+/** Which beat starts each bar: at the downbeats, else every FALLBACK_BAR_BEATS beats. */
+const resolveBarStarts = (beats: readonly number[], downbeats: readonly number[]): number[] => {
+    const downbeatSet = new Set(downbeats);
+    const starts: number[] = [];
+    if (downbeats.length >= 2) {
+        beats.forEach((time, index) => {
+            if (index === 0 || downbeatSet.has(time)) starts.push(index);
+        });
+        return starts;
+    }
+    for (let index = 0; index < beats.length; index += FALLBACK_BAR_BEATS) starts.push(index);
+    return starts;
+};
+
+/** Each bar's first beat and its percussive share of the energy (0..1), from per-frame energy. */
+export const resolveBarPercussiveShares = (
+    energy: PercussiveEnergyFrames,
+    beats: readonly number[],
+    downbeats: readonly number[],
+): { starts: number[]; shares: number[] } => {
+    const starts = resolveBarStarts(beats, downbeats);
+    if (starts.length < MIN_BARS) return { starts, shares: [] };
+    const { percussive, total } = energy;
+    const stepOf = (time: number) => Math.min(total.length, Math.max(0, Math.floor(time * BEAT_THIS_FPS)));
+    const lastGap = beats.length > 1 ? beats[beats.length - 1] - beats[beats.length - 2] : 0.5;
+    const shares = starts.map((first, bar) => {
+        const from = stepOf(beats[first]);
+        const until = bar + 1 < starts.length ? stepOf(beats[starts[bar + 1]]) : stepOf(beats[beats.length - 1] + lastGap);
+        let hit = 0;
+        let all = 0;
+        for (let frame = from; frame < until; frame += 1) {
+            hit += percussive[frame];
+            all += total[frame];
+        }
+        return all > 0 ? hit / all : 0;
+    });
+    return { starts, shares };
+};
+
+/**
+ * Per beat: 1 when its bar's percussive share reaches PERCUSSIVE_GATE x the median bar's, else 0;
+ * all 1 without the energy.
+ */
+export const resolveRhythmicBeats = (
+    energy: PercussiveEnergyFrames | null | undefined,
+    beats: readonly number[],
+    downbeats: readonly number[],
+): number[] => {
+    const rhythmic = beats.map(() => 1);
+    if (!energy) return rhythmic;
+    const { starts, shares } = resolveBarPercussiveShares(energy, beats, downbeats);
+    if (!shares.length) return rhythmic;
+    const threshold = median(shares) * PERCUSSIVE_GATE;
+    starts.forEach((first, bar) => {
+        if (shares[bar] >= threshold) return;
+        const end = bar + 1 < starts.length ? starts[bar + 1] : beats.length;
+        for (let index = first; index < end; index += 1) rhythmic[index] = 0;
+    });
+    return rhythmic;
+};
+
 interface Rise {
     low: number;
     mid: number;
@@ -148,12 +230,28 @@ export const resolveTrackScale = (medianBeatRise: number): number => {
     return round3(TRACK_SCALE_MIN + (1 - TRACK_SCALE_MIN) * Math.min(1, Math.max(0, amount)));
 };
 
-/** The accents of `beats` (seconds, sorted) on the spectrogram they were found on. */
-export const computeBeatAccents = (mel: MelSpectrogram, beats: readonly number[]): BeatAccents => {
+/**
+ * The accents of `beats` (seconds, sorted) on the spectrogram they were found on; `downbeats` mark
+ * the bars and `energy` (the GPU run's percussive energy) gates them.
+ */
+export const computeBeatAccents = (
+    mel: MelSpectrogram,
+    beats: readonly number[],
+    downbeats: readonly number[] = [],
+    energy: PercussiveEnergyFrames | null = null,
+): BeatAccents => {
     const tracks = splitBands(mel);
     const rises = beats.map(time => measure(tracks, time));
 
-    const accents: BeatAccents = { v: BEAT_ACCENTS_VERSION, impact: [], low: [], mid: [], high: [], trackScale: 1 };
+    const accents: BeatAccents = {
+        v: BEAT_ACCENTS_VERSION,
+        impact: [],
+        low: [],
+        mid: [],
+        high: [],
+        rhythmic: resolveRhythmicBeats(energy, beats, downbeats),
+        trackScale: 1,
+    };
     const sortedRaw = rises.map(rise => rise.raw).sort((a, b) => a - b);
     const floor = percentile(sortedRaw, NORMALISE_LOW_PERCENTILE);
     const ceiling = percentile(sortedRaw, NORMALISE_HIGH_PERCENTILE);
@@ -187,5 +285,6 @@ export const isBeatAccents = (value: unknown, beatCount: number): value is BeatA
         && isUnitList(accents.impact, beatCount)
         && isUnitList(accents.low, beatCount)
         && isUnitList(accents.mid, beatCount)
-        && isUnitList(accents.high, beatCount);
+        && isUnitList(accents.high, beatCount)
+        && isUnitList(accents.rhythmic, beatCount);
 };

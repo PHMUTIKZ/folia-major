@@ -21,6 +21,8 @@ export interface BeatFxEvent {
     tone?: { low: number; mid: number; high: number };
     /** Beats since the last downbeat (0 = the downbeat); null before the first one; absent without accents. */
     barPos?: number | null;
+    /** False in a bar with no rhythm (sustained sound only): the beat fires no FX. Absent without accents. */
+    rhythmic?: boolean;
 }
 
 /** A weak beat still peaks this high, so it is seen, just less. */
@@ -28,9 +30,14 @@ export const BEAT_FX_WEAK_BEAT_FLOOR = 0.35;
 
 /**
  * How high a beat's envelopes peak: 1 without accents, else its impact over the floor, times the
- * track's dynamics scale. Also what the discrete effects (a ripple per beat) scale by.
+ * track's dynamics scale; 0 in a bar with no rhythm. Also what the discrete effects (a ripple per
+ * beat) scale by.
  */
-export const resolveBeatFxAccentGain = (event: Pick<BeatFxEvent, 'impact'> | null | undefined, trackScale: number): number => {
+export const resolveBeatFxAccentGain = (
+    event: Pick<BeatFxEvent, 'impact' | 'rhythmic'> | null | undefined,
+    trackScale: number,
+): number => {
+    if (event?.rhythmic === false) return 0;
     if (!event || event.impact === undefined) return trackScale;
     return (BEAT_FX_WEAK_BEAT_FLOOR + (1 - BEAT_FX_WEAK_BEAT_FLOOR) * event.impact) * trackScale;
 };
@@ -107,6 +114,7 @@ export const mergeBeatFxEvents = (
         if (accents) {
             event.impact = accents.impact[index];
             event.tone = { low: accents.low[index], mid: accents.mid[index], high: accents.high[index] };
+            event.rhythmic = accents.rhythmic[index] !== 0;
         }
         return event;
     });

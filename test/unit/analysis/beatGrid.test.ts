@@ -87,8 +87,8 @@ describe('getTrackBeatGrid', () => {
         expect(gpuOnly).toBeNull();
         expect(withCpu).toEqual(GRID);
         expect(analyseBeatGrid.mock.calls.map(call => call[1])).toEqual([
-            { cpuFallback: false, model: 'beat_this' },
-            { cpuFallback: true, model: 'beat_this' },
+            { cpuFallback: false, model: 'beat_this', percussive: false },
+            { cpuFallback: true, model: 'beat_this', percussive: false },
         ]);
     });
 
@@ -114,7 +114,22 @@ describe('getTrackBeatGrid', () => {
     it('runs small0 on the GPU only, whatever the caller allows', async () => {
         analyseBeatGrid.mockResolvedValue(GRID);
         await getTrackBeatGrid('song-2', mid, { model: 'beat_this_small', cpuFallback: true });
-        expect(analyseBeatGrid.mock.calls[0][1]).toEqual({ cpuFallback: false, model: 'beat_this_small' });
+        expect(analyseBeatGrid.mock.calls[0][1]).toEqual({ cpuFallback: false, model: 'beat_this_small', percussive: true });
+    });
+
+    it('gates small0\'s accents on the run\'s percussive energy, and keeps the energy out of the grid', async () => {
+        const beats = Array.from({ length: 48 }, (_, index) => index * 0.25);
+        const downbeats = beats.filter((_, index) => index % 4 === 0);
+        // 50 frames a second; the first second (bar) has no percussive energy.
+        const percussive = new Float32Array(12 * 50).fill(0.3, 50);
+        const total = new Float32Array(12 * 50).fill(1);
+        analyseBeatGrid.mockResolvedValue({ beats, downbeats, percussive: { percussive, total } });
+        const found = await getTrackBeatGrid('song-3', mid, { model: 'beat_this_small' });
+        expect(found).not.toHaveProperty('percussive');
+        expect(found?.accents?.rhythmic.slice(0, 5)).toEqual([0, 0, 0, 0, 1]);
+        const stored = await readStoredBeatGrid('song-3', 'beat_this_small');
+        expect(stored).not.toHaveProperty('percussive');
+        expect(stored?.accents?.rhythmic.slice(0, 5)).toEqual([0, 0, 0, 0, 1]);
     });
 });
 

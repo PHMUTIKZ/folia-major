@@ -1,4 +1,4 @@
-import { runBeatThisGpu, type BeatThisModel } from './beatThisGpu';
+import { runBeatThisGpu, type BeatThisModel, type PercussiveEnergyFrames } from './beatThisGpu';
 
 export type { BeatThisModel } from './beatThisGpu';
 import { modelCanRun, noteModelFailed } from './modelAvailability';
@@ -195,6 +195,11 @@ export interface BeatGrid {
     beats: number[];
     /** The subset of those beats that start a bar. Always a subset - see `snapped` below. */
     downbeats: number[];
+}
+
+/** A grid from `analyseBeatGrid`, with the run's percussive energy when it was asked for and computed. */
+export interface AnalysedBeatGrid extends BeatGrid {
+    percussive?: PercussiveEnergyFrames;
 }
 
 /**
@@ -484,8 +489,13 @@ export const canRunBeatThis = (model: BeatThisModel = 'beat_this'): boolean => {
  */
 export const analyseBeatGrid = async (
     mel: MelSpectrogram,
-    { cpuFallback = false, model = 'beat_this' }: { cpuFallback?: boolean; model?: BeatThisModel } = {},
-): Promise<BeatGrid | null> => {
+    { cpuFallback = false, model = 'beat_this', percussive = false }: {
+        cpuFallback?: boolean;
+        model?: BeatThisModel;
+        /** Also the per-frame percussive energy (beat accents), in the same GPU run; the CPU path has none. */
+        percussive?: boolean;
+    } = {},
+): Promise<AnalysedBeatGrid | null> => {
     if (!canRunBeatThis(model)) return null;
     // The CPU worker only has final0; small0 is GPU or nothing, whatever the caller allows.
     const run = model === 'beat_this' && cpuFallback && typeof window !== 'undefined' ? window.electron?.runBeatThis : undefined;
@@ -497,7 +507,7 @@ export const analyseBeatGrid = async (
     // The renderer's own GPU first (beatThisGpu.ts); it answers null for whatever it cannot take - no
     // export on disk, no usable device, a failed run - and those go to the CPU, if this caller allows it.
     const request = chunks.map(({ data, frames }) => ({ data, frames }));
-    const logits = await runBeatThisGpu(request, model) ?? (run ? await run(request) : null);
+    const logits = await runBeatThisGpu(request, model, percussive ? mel : undefined) ?? (run ? await run(request) : null);
     if (!logits || logits.beat.length !== chunks.length) {
         // Nothing usable came back. Not remembered as a failure - the same empty answer arrives when
         // the weights were just deleted or the worker was restarted under this request - so this only
@@ -514,5 +524,9 @@ export const analyseBeatGrid = async (
         downbeat: logits.downbeat[index],
     }));
     const track = aggregateChunks(predictions, mel.frames);
-    return beatsFromLogits(track.beat, track.downbeat);
+    const grid: AnalysedBeatGrid = beatsFromLogits(track.beat, track.downbeat);
+    // Only the GPU run carries it; the CPU run's logits have none.
+    const energy = (logits as { percussive?: PercussiveEnergyFrames }).percussive;
+    if (energy) grid.percussive = energy;
+    return grid;
 };

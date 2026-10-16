@@ -1,6 +1,7 @@
 import { getFromCache, saveToCache } from '../db';
 import { melSpectrogramOffThread } from '../automix/analysisOffThread';
 import { analyseBeatGrid, canRunBeatThis, type BeatGrid, type BeatThisModel } from './beatThis';
+import { runPercussiveEnergyGpu } from './beatThisGpu';
 import { BEAT_GRID_PREFIXES } from './beatGridKeys';
 import { computeBeatAccents, isBeatAccents, type BeatAccents } from './beatAccents';
 
@@ -122,10 +123,14 @@ export const getTrackBeatGrid = async (
         const mid = await readMid();
         if (!mid) return null;
         const mel = await melSpectrogramOffThread(mid);
-        const grid = await analyseBeatGrid(mel, { cpuFallback, model });
+        const small = model === 'beat_this_small';
+        // small0 also has the GPU measure the spectrogram's percussive energy, for the accents' gate.
+        const analysed = await analyseBeatGrid(mel, { cpuFallback, model, percussive: small });
+        // The energy is only an input: the grid kept and handed on is the beats alone.
+        const grid: BeatGrid | null = analysed ? { beats: analysed.beats, downbeats: analysed.downbeats } : null;
         // The accents ride on the spectrogram the beats were found on: a few ms, no second decode.
-        const found: AccentedBeatGrid | null = grid?.beats.length && model === 'beat_this_small'
-            ? { ...grid, accents: computeBeatAccents(mel, grid.beats) }
+        const found: AccentedBeatGrid | null = grid?.beats.length && small
+            ? { ...grid, accents: computeBeatAccents(mel, grid.beats, grid.downbeats, analysed?.percussive ?? null) }
             : grid;
         if (found) await storeBeatGrid(key, found, model);
         return found;
@@ -157,7 +162,10 @@ export const getTrackBeatAccents = (
     const run = (async () => {
         const mid = await readMid();
         if (!mid) return null;
-        const accents = computeBeatAccents(await melSpectrogramOffThread(mid), grid.beats);
+        const mel = await melSpectrogramOffThread(mid);
+        // The percussive energy alone on the GPU (no model run); null leaves every beat rhythmic.
+        const energy = await runPercussiveEnergyGpu(mel);
+        const accents = computeBeatAccents(mel, grid.beats, grid.downbeats, energy);
         // Stored against the list now on disk, so a list replaced meanwhile is not given another's accents.
         const stored = await readStoredBeatGrid(key, 'beat_this_small');
         if (stored && stored.beats.length === grid.beats.length && stored.beats.every((time, index) => time === grid.beats[index])) {

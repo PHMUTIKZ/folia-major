@@ -10,7 +10,7 @@
 | `beatThis.ts` | Beat This! 的前处理契约：梅尔频谱、1500 帧分块、峰值挑选、网格折算。推理先走 GPU，`cpuFallback` 决定能否退到 CPU（只有 final0 有 CPU 路径）。`model` 选模型：`beat_this`（final0，automix 用，需下载）或 `beat_this_small`（small0，智能动感模式用，随应用打包）。 |
 | `beatThisGpu.ts` + `beatThisWgsl/` | 渲染进程 Worker 里的 WebGPU 推理，两个模型共用同一套 kernel 和同一个 GPU device，Worker 里各加载一次、同时常驻，交替使用不重新加载；`probeBeatThisGpu` 给设置页判断有没有可用 GPU。 |
 | `beatGrid.ts` | 整首歌的拍点，按模型分开：先读存盘结果，正在跑就等同一次，否则跑一次并存盘（final0 存 `beat_this_grid_<分析 key>`，small0 存 `beat_this_small_grid_<分析 key>`，都归入「分析」缓存类别）。两个模型的结果互不读取、互不合并。只存整首；只读了开头的 automix 分析自己跑、不存。 |
-| `beatAccents.ts` | 每拍的重音：强度、低 / 中 / 高三段占比、整曲动感系数。在 small0 的同一次分析里，用同一份梅尔频谱算出，作为可选字段 `accents` 和拍点存在一起（不升拍点版本号，automix 的 final0 存档不写这个字段）。旧存档没有这个字段时，`getTrackBeatAccents` 在 worker 上重新解码、补算并写回。 |
+| `beatAccents.ts` | 每拍的重音：强度、低 / 中 / 高三段占比、整曲动感系数。在 small0 的同一次分析里，用同一份梅尔频谱算出，作为可选字段 `accents` 和拍点存在一起（不升拍点版本号，automix 的 final0 存档不写这个字段）。旧存档没有这个字段时，`getTrackBeatAccents` 在 worker 上重新解码、补算并写回。另有 `rhythmic`（每拍 0/1）：每小节的打击成分占比低于全曲中位数的 0.45 时，这一小节的拍不出特效（只有喇叭、铺底的前奏）。打击占比由 HPSS 在 GPU 上和 beat_this 同一次运行算出（`beatThisWgsl/percussive.ts`），补算时单独跑一次 HPSS；GPU 不可用时所有拍都算有节奏。 |
 | `modelAvailability.ts` | 两个模型（beat_this / htdemucs）的权重是否在盘上，可同步读取。 |
 
 约定：

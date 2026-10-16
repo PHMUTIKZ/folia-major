@@ -83,7 +83,7 @@ export interface DioramaBeatRipple {
  */
 export const resolveDioramaBeatRipple = (
     kind: 'beat' | 'downbeat',
-    event: Pick<BeatFxEvent, 'impact' | 'tone'> | null,
+    event: Pick<BeatFxEvent, 'impact' | 'tone' | 'rhythmic'> | null,
     trackScale: number,
     intensity: number,
 ): DioramaBeatRipple => {

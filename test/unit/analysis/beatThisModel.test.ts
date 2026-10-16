@@ -36,9 +36,21 @@ describe('the small0 model', () => {
     it('asks the GPU for small0 and never the CPU, even when the caller allows it', async () => {
         runBeatThisGpu.mockResolvedValue(null);
         expect(await analyseBeatGrid(mel, { model: 'beat_this_small', cpuFallback: true })).toBeNull();
-        expect(runBeatThisGpu).toHaveBeenCalledWith(expect.any(Array), 'beat_this_small');
+        expect(runBeatThisGpu).toHaveBeenCalledWith(expect.any(Array), 'beat_this_small', undefined);
         expect(runBeatThis).not.toHaveBeenCalled();
         expect(noteModelFailed).not.toHaveBeenCalled();
+    });
+
+    it('hands the GPU the whole spectrogram for the percussive energy when asked, and returns it', async () => {
+        const energy = { percussive: new Float32Array(1), total: new Float32Array(1) };
+        runBeatThisGpu.mockImplementation(async (chunks: Array<{ frames: number }>) => ({
+            beat: chunks.map(chunk => new Float32Array(chunk.frames).fill(-10)),
+            downbeat: chunks.map(chunk => new Float32Array(chunk.frames).fill(-10)),
+            percussive: energy,
+        }));
+        const grid = await analyseBeatGrid(mel, { model: 'beat_this_small', percussive: true });
+        expect(runBeatThisGpu).toHaveBeenCalledWith(expect.any(Array), 'beat_this_small', mel);
+        expect(grid?.percussive).toBe(energy);
     });
 
     it('leaves final0 on its old path: the GPU first, then the CPU when allowed', async () => {
@@ -46,7 +58,7 @@ describe('the small0 model', () => {
         runBeatThisGpu.mockResolvedValue(null);
         runBeatThis.mockResolvedValue(null);
         await analyseBeatGrid(mel, { cpuFallback: true });
-        expect(runBeatThisGpu).toHaveBeenCalledWith(expect.any(Array), 'beat_this');
+        expect(runBeatThisGpu).toHaveBeenCalledWith(expect.any(Array), 'beat_this', undefined);
         expect(runBeatThis).toHaveBeenCalledTimes(1);
         expect(noteModelFailed).toHaveBeenCalledWith('beat_this');
     });

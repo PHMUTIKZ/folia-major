@@ -327,11 +327,13 @@ export const DioramaParticleField: React.FC<DioramaParticleFieldProps> = ({
                 const trackScale = getBeatFxTrackScale();
                 if (beatTriggers.downbeat && intensities.downbeat > 0) {
                     const ripple = resolveDioramaBeatRipple('downbeat', getBeatFxLastDownbeat(), trackScale, intensities.downbeat);
-                    spawnRipple(pool, ripple.index, ripple.strength, flowTimeRef.current, isCorridor, readHeadAlong);
+                    // A beat in a bar with no rhythm has strength 0: no ripple, no pool slot taken.
+                    if (ripple.strength > 0) spawnRipple(pool, ripple.index, ripple.strength, flowTimeRef.current, isCorridor, readHeadAlong);
                 }
                 if (beatTriggers.beat && intensities.beat > 0) {
                     const ripple = resolveDioramaBeatRipple('beat', getBeatFxLastBeat(), trackScale, intensities.beat);
-                    spawnRipple(pool, ripple.index, ripple.strength, flowTimeRef.current, isCorridor, readHeadAlong);
+                    // A beat in a bar with no rhythm has strength 0: no ripple, no pool slot taken.
+                    if (ripple.strength > 0) spawnRipple(pool, ripple.index, ripple.strength, flowTimeRef.current, isCorridor, readHeadAlong);
                 }
             }
         }

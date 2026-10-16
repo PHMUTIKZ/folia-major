@@ -1,14 +1,18 @@
 /// <reference types="@webgpu/types" />
 import { BeatThisWgsl, type BeatThisWgslManifest } from '../services/analysis/beatThisWgsl/runtime';
+import { runPercussiveEnergy } from '../services/analysis/beatThisWgsl/percussive';
 
 // src/workers/beatThisGpu.worker.ts
 // Beat This! on the renderer's own GPU, beside the visualizer, from a thread that does not paint.
 //
 // The worker owns its WebGPU device and the models built on it - final0 for automix, small0 for the
 // beat FX, each built the first time it is loaded - and answers three messages: 'load' (a model's
-// weights and manifest, transferred in once), 'run' (a model's mel chunks of up to 1500 frames, logits back) and
-// 'dispose' (destroy the device before the page terminates this thread, so the GPU memory goes back
-// at once rather than whenever the dead thread's objects are collected). Each
+// weights and manifest, transferred in once), 'run' (a model's mel chunks of up to 1500 frames, logits back;
+// with `percussive`, the whole spectrogram as well, whose per-frame percussive energy - HPSS,
+// beatThisWgsl/percussive.ts, for the beat accents - comes back with them), 'percussive' (that alone, for
+// a track whose beats are already known) and 'dispose' (destroy the device before the page terminates
+// this thread, so the GPU memory goes back at once rather than whenever the dead thread's objects are
+// collected). Each
 // chunk is run with 'auto' slicing - one stage on the GPU at a time, cut finer wherever a stage
 // outlasts a 120 Hz frame - because the GPU only switches between command buffers, and one
 // 45-80 ms submit is enough to cost a busy visualizer several frames (measured with
@@ -21,7 +25,8 @@ type ModelName = 'beat_this' | 'beat_this_small';
 
 type Request =
     | { id: number; kind: 'load'; model: ModelName; weights: Uint8Array<ArrayBuffer>; manifest: BeatThisWgslManifest }
-    | { id: number; kind: 'run'; model: ModelName; chunks: Float32Array<ArrayBuffer>[] }
+    | { id: number; kind: 'run'; model: ModelName; chunks: Float32Array<ArrayBuffer>[]; percussive?: { mel: Float32Array<ArrayBuffer>; frames: number } }
+    | { id: number; kind: 'percussive'; mel: Float32Array<ArrayBuffer>; frames: number }
     | { id: number; kind: 'dispose' };
 
 const models = new Map<ModelName, BeatThisWgsl>();
@@ -72,6 +77,19 @@ self.onmessage = async (event: MessageEvent<Request>) => {
             self.postMessage({ id: request.id, result: deviceLabel });
             return;
         }
+        if (request.kind === 'percussive') {
+            let opened: GPUDevice;
+            try {
+                opened = await openDevice();
+            } catch (error) {
+                self.postMessage({ id: request.id, error: String((error as Error)?.message ?? error), scope: 'device' });
+                return;
+            }
+            if (lost) throw new Error(lost);
+            const energy = await runPercussiveEnergy(opened, request.mel, request.frames);
+            self.postMessage({ id: request.id, result: energy }, { transfer: [energy.percussive.buffer, energy.total.buffer] });
+            return;
+        }
         if (request.kind === 'dispose') {
             for (const model of models.values()) model.destroy();
             models.clear();
@@ -90,7 +108,17 @@ self.onmessage = async (event: MessageEvent<Request>) => {
             beat.push(result.beat.slice());
             downbeat.push(result.downbeat.slice());
         }
-        self.postMessage({ id: request.id, result: { beat, downbeat } }, { transfer: [...beat, ...downbeat].map(track => track.buffer) });
+        // The percussive energy is an extra: a failure here leaves the beats as they are, without it.
+        let percussive: Awaited<ReturnType<typeof runPercussiveEnergy>> | undefined;
+        if (request.percussive && device && !lost) {
+            try {
+                percussive = await runPercussiveEnergy(device, request.percussive.mel, request.percussive.frames);
+            } catch (error) {
+                console.warn(`[beat-this-gpu] percussive energy failed: ${(error as Error)?.message ?? error}`);
+            }
+        }
+        const tracks = [...beat, ...downbeat, ...(percussive ? [percussive.percussive, percussive.total] : [])];
+        self.postMessage({ id: request.id, result: { beat, downbeat, percussive } }, { transfer: tracks.map(track => track.buffer) });
     } catch (error) {
         self.postMessage({ id: request.id, error: String((error as Error)?.message ?? error) });
     }

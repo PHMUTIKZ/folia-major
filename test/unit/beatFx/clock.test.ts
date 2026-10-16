@@ -105,6 +105,7 @@ describe('beat accents on the clock', () => {
         low: [0.8, 0.2, 0.5, 0.6, 0.1, 0.3],
         mid: [0.1, 0.4, 0.3, 0.2, 0.1, 0.3],
         high: [0.1, 0.4, 0.2, 0.2, 0.8, 0.4],
+        rhythmic: [1, 1, 1, 1, 1, 1],
         trackScale: 0.6,
     };
 
@@ -160,6 +161,9 @@ describe('beat accents on the clock', () => {
         expect(resolveBeatFxAccentGain({ impact: 1 }, 0.6)).toBeCloseTo(0.6);
         expect(resolveBeatFxAccentGain({}, 1)).toBe(1);
         expect(resolveBeatFxAccentGain(null, 1)).toBe(1);
+        // A beat in a bar with no rhythm fires nothing, whatever its impact.
+        expect(resolveBeatFxAccentGain({ impact: 1, rhythmic: false }, 1)).toBe(0);
+        expect(mergeBeatFxEvents(beats, downbeats, { ...accents, rhythmic: [0, 1, 1, 1, 1, 1] })[0].rhythmic).toBe(false);
         const state = createBeatFxClockState(mergeBeatFxEvents(beats, downbeats, accents), accents.trackScale);
         // Stepped onto the beats exactly, so each envelope reads its peak.
         stepBeatFxClock(state, 1.45, FRAME);
