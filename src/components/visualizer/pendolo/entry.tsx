@@ -15,6 +15,8 @@ export default defineVisualizer({
     previewSeed: 'pendolo',
     previewStartOffset: 0,
     tuningKind: 'pendolo',
+    // 智能动感模式: the clockwork steps on the beats and draws its beat FX (pendolo/pendoloBeatFx.ts).
+    drawsBeatFx: true,
     // The song-scoped seed resets Pendolo's lyric rail state before the next track starts.
     render: props => <VisualizerPendolo key={props.seed} {...props} />,
     renderSettingsPanel: props => <PendoloSettingsPanel {...props} />,
