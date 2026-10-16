@@ -28,13 +28,19 @@ import {
 } from './dioramaParticleModel';
 import {
     createDioramaBeatCounter,
-    DIORAMA_BEAT_RIPPLE_STRENGTH,
-    DIORAMA_DOWNBEAT_RIPPLE_STRENGTH,
     resolveDioramaBeatClusterPulse,
+    resolveDioramaBeatRipple,
     stepDioramaBeatCounter,
 } from './dioramaBeatRipples';
 import { beatImpact, downbeatImpact } from '../../../stores/motionSignals';
-import { getBeatFxFiredCounts, getBeatFxIntensities, isBeatFxReady } from '../../../services/beatFx/beatFxLive';
+import {
+    getBeatFxFiredCounts,
+    getBeatFxIntensities,
+    getBeatFxLastBeat,
+    getBeatFxLastDownbeat,
+    getBeatFxTrackScale,
+    isBeatFxReady,
+} from '../../../services/beatFx/beatFxLive';
 import {
     createDioramaParticleGlowMaterial,
     createDioramaParticleMaterial,
@@ -318,11 +324,14 @@ export const DioramaParticleField: React.FC<DioramaParticleFieldProps> = ({
             });
             if (beatFxActive) {
                 const intensities = getBeatFxIntensities();
+                const trackScale = getBeatFxTrackScale();
                 if (beatTriggers.downbeat && intensities.downbeat > 0) {
-                    spawnRipple(pool, 0, DIORAMA_DOWNBEAT_RIPPLE_STRENGTH * intensities.downbeat, flowTimeRef.current, isCorridor, readHeadAlong);
+                    const ripple = resolveDioramaBeatRipple('downbeat', getBeatFxLastDownbeat(), trackScale, intensities.downbeat);
+                    spawnRipple(pool, ripple.index, ripple.strength, flowTimeRef.current, isCorridor, readHeadAlong);
                 }
                 if (beatTriggers.beat && intensities.beat > 0) {
-                    spawnRipple(pool, 1, DIORAMA_BEAT_RIPPLE_STRENGTH * intensities.beat, flowTimeRef.current, isCorridor, readHeadAlong);
+                    const ripple = resolveDioramaBeatRipple('beat', getBeatFxLastBeat(), trackScale, intensities.beat);
+                    spawnRipple(pool, ripple.index, ripple.strength, flowTimeRef.current, isCorridor, readHeadAlong);
                 }
             }
         }

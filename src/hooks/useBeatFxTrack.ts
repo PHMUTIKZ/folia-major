@@ -43,9 +43,14 @@ export function useBeatFxTrack(): boolean {
         let cancelled = false;
         void beats.then((result) => {
             if (cancelled) return;
-            setBeatFxEvents(key, result.events, result.source, result.note);
+            setBeatFxEvents(key, result.events, result.source, result.note, result.trackScale);
             // Only the case that needs explaining; a track with beats shows them.
             if (result.source === 'none') console.info(`[BeatFx] no beats for this track: ${result.note}`);
+            // A list stored before accents existed: the same beats with them, once measured.
+            void result.accented?.then((accented) => {
+                if (cancelled || !accented) return;
+                setBeatFxEvents(key, accented.events, accented.source, accented.note, accented.trackScale);
+            });
         }).catch((error) => {
             if (cancelled) return;
             setBeatFxEvents(key, [], 'none', String(error));

@@ -12,6 +12,10 @@ import type { BeatFxSourceKind } from './beatFxSource';
 // reading settings itself. Discrete effects (a ripple per beat) count `getBeatFxFiredCounts` instead
 // and scale by `getBeatFxIntensities`.
 //
+// With accents (analysis/beatAccents.ts) the envelopes already peak lower on a weak beat and on a
+// track whose beats barely stand out; a discrete effect reads the beat it fires for with
+// `getBeatFxLastBeat` / `getBeatFxLastDownbeat` and scales by `resolveBeatFxAccentGain`.
+//
 // Diagnostics (`window.__foliaBeatFx`: beats fired, source, latency, the two envelopes) exist in a
 // dev build, or in any build with localStorage['folia.dev.beatFxDebug'] = '1' at startup.
 
@@ -106,6 +110,8 @@ export const beginBeatFxTrack = (key: string | null) => {
     state.events = [];
     state.cursor = 0;
     state.lastTime = null;
+    state.lastBeat = null;
+    state.lastDownbeat = null;
     if (debug) {
         debug.trackKey = key;
         debug.source = key ? 'loading' : 'none';
@@ -114,10 +120,20 @@ export const beginBeatFxTrack = (key: string | null) => {
     }
 };
 
-/** Installs the beat list for `key`; ignored if the track changed while it was loading. */
-export const setBeatFxEvents = (key: string, events: BeatFxEvent[], source: BeatFxSourceKind, note?: string) => {
+/**
+ * Installs the beat list for `key`, with its dynamics scale; ignored if the track changed while it was
+ * loading. Called again for the same track when its accents arrive.
+ */
+export const setBeatFxEvents = (
+    key: string,
+    events: BeatFxEvent[],
+    source: BeatFxSourceKind,
+    note?: string,
+    trackScale = 1,
+) => {
     if (key !== trackKey) return;
     state.events = events;
+    state.trackScale = trackScale;
     holdUntil = 0;
     // Resync on the next step rather than firing everything before the current position.
     state.lastTime = null;
@@ -149,6 +165,15 @@ export const stopBeatFx = () => {
     lastStepAt = null;
     hearing = false;
 };
+
+/** The last fired plain beat (not a downbeat) of this track, or null. */
+export const getBeatFxLastBeat = (): BeatFxEvent | null => state.lastBeat;
+
+/** The last fired downbeat of this track, or null. */
+export const getBeatFxLastDownbeat = (): BeatFxEvent | null => state.lastDownbeat;
+
+/** The playing track's dynamics scale (0.45..1); 1 without accents. */
+export const getBeatFxTrackScale = (): number => state.trackScale;
 
 /** Alternating ±1 for the camera tilt; flips on every fired beat. */
 export const getBeatFxRotationSign = (): number => state.rotationSign;

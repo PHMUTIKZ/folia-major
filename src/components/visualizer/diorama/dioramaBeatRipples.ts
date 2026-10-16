@@ -1,4 +1,5 @@
 import { DIORAMA_PARTICLE_AUDIO_SCALE_MAX } from './cameraPath';
+import { resolveBeatFxAccentGain, type BeatFxEvent } from '../../../services/beatFx/clock';
 
 // src/components/visualizer/diorama/dioramaBeatRipples.ts
 // Diorama's share of 智能动感模式: once the playing track's beats are in (beatFxLive's
@@ -14,6 +15,10 @@ import { DIORAMA_PARTICLE_AUDIO_SCALE_MAX } from './cameraPath';
 // The clock is read as counts of fired beats (beatFxLive's `getBeatFxFiredCounts`), not as the
 // envelopes crossing a threshold: one beat is exactly one ripple whatever the frame rate, and a seek -
 // where the clock resyncs without firing - spawns nothing.
+//
+// With accents (analysis/beatAccents.ts) a ripple is as strong as its beat hits
+// (`resolveBeatFxAccentGain`), and a plain beat whose hit is mostly low takes the bass scale too.
+// Without them both are what they were: full strength, mid scale.
 
 /** Ripple strength a beat hands spawnRipple at strength 1, where a band onset hands its transient. */
 export const DIORAMA_BEAT_RIPPLE_STRENGTH = 0.9;
@@ -62,3 +67,28 @@ export const resolveDioramaBeatClusterPulse = (beat: number, downbeat: number): 
     DIORAMA_PARTICLE_AUDIO_SCALE_MAX,
     1 + Math.max(0, beat) * 0.08 + Math.max(0, downbeat) * 0.1,
 );
+
+/** A plain beat whose low band carries more than this share of its hit spawns a bass-scale ripple. */
+export const DIORAMA_LOW_BEAT_SHARE = 0.5;
+
+export interface DioramaBeatRipple {
+    /** RIPPLE_BANDS index: 0 bass scale, 1 mid scale. */
+    index: number;
+    strength: number;
+}
+
+/**
+ * The ripple one fired beat spawns: its scale, and its strength from the slider (`intensity`) and the
+ * beat's accent. `event` is the beat that fired, null or without accents for the plain mapping.
+ */
+export const resolveDioramaBeatRipple = (
+    kind: 'beat' | 'downbeat',
+    event: Pick<BeatFxEvent, 'impact' | 'tone'> | null,
+    trackScale: number,
+    intensity: number,
+): DioramaBeatRipple => {
+    const gain = resolveBeatFxAccentGain(event, trackScale);
+    if (kind === 'downbeat') return { index: 0, strength: DIORAMA_DOWNBEAT_RIPPLE_STRENGTH * intensity * gain };
+    const low = event?.tone && event.tone.low > DIORAMA_LOW_BEAT_SHARE;
+    return { index: low ? 0 : 1, strength: DIORAMA_BEAT_RIPPLE_STRENGTH * intensity * gain };
+};

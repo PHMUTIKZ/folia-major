@@ -1,7 +1,13 @@
+import type { BeatAccents } from '../analysis/beatAccents';
+
 // src/services/beatFx/clock.ts
 // Pure beat clock for the beat FX (Sonnet 智能动感模式): walks a sorted beat/downbeat event list against the
 // heard playback time and produces two decaying impact envelopes. No React, no MotionValues - the
 // caller owns the frame loop and writes the envelopes wherever it needs them.
+//
+// When the track's beats come with accents (analysis/beatAccents.ts), each one peaks at
+// `resolveBeatFxAccentGain` instead of 1 and carries its tone and bar position for the modes that
+// vary by them. Without accents every value below is the one it was before they existed.
 
 export type BeatFxEventKind = 'beat' | 'downbeat';
 
@@ -9,7 +15,25 @@ export interface BeatFxEvent {
     /** Seconds from the start of the track. */
     t: number;
     kind: BeatFxEventKind;
+    /** 0..1 how hard this beat hits; absent without accents. */
+    impact?: number;
+    /** Each band's share of the hit (sum 1); absent without accents. */
+    tone?: { low: number; mid: number; high: number };
+    /** Beats since the last downbeat (0 = the downbeat); null before the first one; absent without accents. */
+    barPos?: number | null;
 }
+
+/** A weak beat still peaks this high, so it is seen, just less. */
+export const BEAT_FX_WEAK_BEAT_FLOOR = 0.35;
+
+/**
+ * How high a beat's envelopes peak: 1 without accents, else its impact over the floor, times the
+ * track's dynamics scale. Also what the discrete effects (a ripple per beat) scale by.
+ */
+export const resolveBeatFxAccentGain = (event: Pick<BeatFxEvent, 'impact'> | null | undefined, trackScale: number): number => {
+    if (!event || event.impact === undefined) return trackScale;
+    return (BEAT_FX_WEAK_BEAT_FLOOR + (1 - BEAT_FX_WEAK_BEAT_FLOOR) * event.impact) * trackScale;
+};
 
 /** Envelope shape, from the approved Sonnet mockup; both envelopes peak at 1. */
 // Beats decay in 160 ms (mockup: 300) so each one lands as a separate jump at ~160 BPM instead of
@@ -34,10 +58,18 @@ export interface BeatFxClockState {
     firedDownbeats: number;
     /** Track time of the last fired event, for diagnostics. */
     lastFiredT: number | null;
+    /** The track's dynamics scale (0.45..1); 1 without accents. */
+    trackScale: number;
+    /** The last fired plain beat and downbeat, for effects that vary by accent. */
+    lastBeat: BeatFxEvent | null;
+    lastDownbeat: BeatFxEvent | null;
 }
 
-export const createBeatFxClockState = (events: BeatFxEvent[] = []): BeatFxClockState => ({
+export const createBeatFxClockState = (events: BeatFxEvent[] = [], trackScale = 1): BeatFxClockState => ({
     events,
+    trackScale,
+    lastBeat: null,
+    lastDownbeat: null,
     cursor: 0,
     lastTime: null,
     beatImpact: 0,
@@ -60,16 +92,39 @@ export const findNextBeatFxEvent = (events: readonly BeatFxEvent[], time: number
     return low;
 };
 
-/** Merges raw beat_this output into one sorted list; a downbeat replaces the beat it sits on. */
-export const mergeBeatFxEvents = (beats: readonly number[], downbeats: readonly number[]): BeatFxEvent[] => {
+/**
+ * Merges raw beat_this output into one sorted list; a downbeat replaces the beat it sits on. With
+ * `accents` (one entry per beat) every beat also carries its impact, tone and bar position.
+ */
+export const mergeBeatFxEvents = (
+    beats: readonly number[],
+    downbeats: readonly number[],
+    accents?: BeatAccents,
+): BeatFxEvent[] => {
     const downbeatSet = new Set(downbeats);
-    const events: BeatFxEvent[] = beats.map(t => ({ t, kind: downbeatSet.has(t) ? 'downbeat' : 'beat' }));
+    const events: BeatFxEvent[] = beats.map((t, index) => {
+        const event: BeatFxEvent = { t, kind: downbeatSet.has(t) ? 'downbeat' : 'beat' };
+        if (accents) {
+            event.impact = accents.impact[index];
+            event.tone = { low: accents.low[index], mid: accents.mid[index], high: accents.high[index] };
+        }
+        return event;
+    });
     // beat_this snaps every downbeat onto a beat, but keep any stray one rather than drop it.
     const beatSet = new Set(beats);
     downbeats.forEach((t) => {
         if (!beatSet.has(t)) events.push({ t, kind: 'downbeat' });
     });
-    return events.sort((a, b) => a.t - b.t);
+    events.sort((a, b) => a.t - b.t);
+    if (accents) {
+        // Counted from the model's own downbeats, so a missed or extra beat re-aligns at the next bar.
+        let barPos: number | null = null;
+        events.forEach((event) => {
+            barPos = event.kind === 'downbeat' ? 0 : barPos === null ? null : barPos + 1;
+            event.barPos = barPos;
+        });
+    }
+    return events;
 };
 
 /**
@@ -111,15 +166,19 @@ export const stepBeatFxClock = (
         // How late this frame is relative to the event, so the envelope starts where it should.
         const lateMs = Math.max(0, heardTime - event.t) * 1000;
         const isDownbeat = event.kind === 'downbeat';
-        state.beatImpact = Math.max(state.beatImpact, Math.exp(-lateMs / BEAT_FX_BEAT_DECAY_MS * 2.3));
+        const gain = resolveBeatFxAccentGain(event, state.trackScale);
+        state.beatImpact = Math.max(state.beatImpact, gain * Math.exp(-lateMs / BEAT_FX_BEAT_DECAY_MS * 2.3));
         state.rotationSign = -state.rotationSign;
         state.lastFiredT = event.t;
         if (isDownbeat) {
             state.downbeatImpact = Math.max(
                 state.downbeatImpact,
-                Math.exp(-lateMs / BEAT_FX_DOWNBEAT_DECAY_MS * 2.3),
+                gain * Math.exp(-lateMs / BEAT_FX_DOWNBEAT_DECAY_MS * 2.3),
             );
             state.firedDownbeats += 1;
+            state.lastDownbeat = event;
+        } else {
+            state.lastBeat = event;
         }
         // A downbeat is also a beat, so it counts towards both.
         state.firedBeats += 1;

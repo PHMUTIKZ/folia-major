@@ -1,6 +1,13 @@
 import type { AudioBands } from '../../../types';
 import { beatImpact, downbeatImpact } from '../../../stores/motionSignals';
-import { getBeatFxRotationSign, isBeatFxHearing, isBeatFxReady } from '../../../services/beatFx/beatFxLive';
+import {
+    getBeatFxLastBeat,
+    getBeatFxLastDownbeat,
+    getBeatFxRotationSign,
+    isBeatFxHearing,
+    isBeatFxReady,
+} from '../../../services/beatFx/beatFxLive';
+import type { BeatFxEvent } from '../../../services/beatFx/clock';
 import type { SonnetAnimationCue } from './types';
 
 // src/components/visualizer/sonnet/sonnetBeatFx.ts
@@ -21,6 +28,11 @@ import type { SonnetAnimationCue } from './types';
 // null and Sonnet draws its original frame - no half-on state while the analysis runs, or on a machine
 // it cannot run on. Which modes start the beat clock at all is their registry entry's
 // `drawsBeatFx`; another mode adds beat FX with its own reader over the same two signals.
+//
+// With accents (analysis/beatAccents.ts) the two signals already peak by how hard each beat hits, and
+// the last fired beat shapes the punch (`resolveSonnetBeatFxAccent`): a low hit pushes in more, a high
+// one tilts more, and the beat before the downbeat (bar position 3) tilts half as much - the camera
+// swings back before the bar lands. Without accents the shaping is exactly 1.
 
 export const SONNET_BEAT_FX = {
     /** Mockup used 3% at 118 BPM; at ~160 BPM that read as drift, so beats punch harder and shorter. */
@@ -35,6 +47,30 @@ export const SONNET_BEAT_FX = {
     /** Line layers sit at this alpha and the treble band lifts them to 1. */
     lineBaseAlpha: 0.78,
 } as const;
+
+/** Multipliers on the beat's share of the zoom and on the tilt, from the last fired beat's accent. */
+export interface SonnetBeatFxAccent {
+    zoom: number;
+    tilt: number;
+}
+
+export const SONNET_BEAT_FX_NO_ACCENT: Readonly<SonnetBeatFxAccent> = { zoom: 1, tilt: 1 };
+
+/** The punch shaping for the last fired beat; no shaping when it carries no accent. */
+export const resolveSonnetBeatFxAccent = (
+    event: Pick<BeatFxEvent, 'tone' | 'barPos'> | null,
+    out: SonnetBeatFxAccent = { zoom: 1, tilt: 1 },
+): SonnetBeatFxAccent => {
+    if (!event?.tone) {
+        out.zoom = 1;
+        out.tilt = 1;
+        return out;
+    }
+    // 1 at an even split; 0.85..1.15 and 0.7..1.3 at the extremes.
+    out.zoom = 0.85 + 0.3 * event.tone.low;
+    out.tilt = (0.7 + 0.6 * event.tone.high) * (event.barPos === 3 ? 0.5 : 1);
+    return out;
+};
 
 export interface SonnetBeatFxFrame {
     /** Camera scale multiplier. */
@@ -73,9 +109,10 @@ export const resolveSonnetBeatFxFrame = (
     wallTimeSec: number,
     lineLift: number,
     out: SonnetBeatFxFrame = { zoom: 1, rotation: 0, tear: 0, tearSeed: 0, flare: 0, lineLift: 0 },
+    accent: Readonly<SonnetBeatFxAccent> = SONNET_BEAT_FX_NO_ACCENT,
 ): SonnetBeatFxFrame => {
-    out.zoom = 1 + (SONNET_BEAT_FX.zoomPercent / 100) * k + (SONNET_BEAT_FX.downbeatZoomPercent / 100) * d;
-    out.rotation = (SONNET_BEAT_FX.rotationDeg * Math.PI / 180) * k * rotationSign;
+    out.zoom = 1 + (SONNET_BEAT_FX.zoomPercent / 100) * k * accent.zoom + (SONNET_BEAT_FX.downbeatZoomPercent / 100) * d;
+    out.rotation = (SONNET_BEAT_FX.rotationDeg * Math.PI / 180) * k * rotationSign * accent.tilt;
     out.tear = d > 0.02 ? SONNET_BEAT_FX.tear * d : 0;
     out.tearSeed = Math.floor(wallTimeSec * SONNET_BEAT_FX.tearRate) % 997;
     out.flare = SONNET_BEAT_FX.flare * d;
@@ -94,6 +131,7 @@ export const isSonnetBeatFxActive = (smartBeatEnabled: boolean): boolean =>
 export const createSonnetBeatFxReader = () => {
     let smoothedTreble = 0;
     const frame: SonnetBeatFxFrame = { zoom: 1, rotation: 0, tear: 0, tearSeed: 0, flare: 0, lineLift: 0 };
+    const accent: SonnetBeatFxAccent = { zoom: 1, tilt: 1 };
     return (audioBands: AudioBands | undefined, smartBeatEnabled: boolean): SonnetBeatFxFrame | null => {
         if (!isSonnetBeatFxActive(smartBeatEnabled)) {
             smoothedTreble = 0;
@@ -105,6 +143,10 @@ export const createSonnetBeatFxReader = () => {
         // Ignore the idle breathing floor, then ease: quick attack, slow release, no discrete trigger.
         const target = Math.min(1, Math.max(0, (treble - 0.04) / 0.35));
         smoothedTreble += (target - smoothedTreble) * (target > smoothedTreble ? 0.25 : 0.08);
+        // The punch on screen is the latest one, a downbeat or a plain beat.
+        const beat = getBeatFxLastBeat();
+        const downbeat = getBeatFxLastDownbeat();
+        const last = beat && (!downbeat || beat.t > downbeat.t) ? beat : downbeat;
         return resolveSonnetBeatFxFrame(
             beatImpact.get(),
             downbeatImpact.get(),
@@ -112,6 +154,7 @@ export const createSonnetBeatFxReader = () => {
             performance.now() / 1000,
             smoothedTreble,
             frame,
+            resolveSonnetBeatFxAccent(last, accent),
         );
     };
 };

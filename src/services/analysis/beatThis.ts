@@ -90,6 +90,20 @@ const buildFilterbank = (): MelBand[] => {
     });
 };
 
+/**
+ * Centre frequency of each of the 128 mel bands, in Hz - where its triangle peaks. Read by the
+ * beat accents (beatAccents.ts) to split the spectrogram into low / mid / high; the model never sees it.
+ */
+export const melBandCentresHz = (): number[] => {
+    const melMin = hzToMel(F_MIN);
+    const melMax = hzToMel(F_MAX);
+    return Array.from({ length: N_MELS }, (_, band) =>
+        melToHz(melMin + ((melMax - melMin) * (band + 1)) / (N_MELS + 1)));
+};
+
+/** Mel bands per spectrogram frame. */
+export const MEL_BANDS = N_MELS;
+
 let filterbank: MelBand[] | null = null;
 /**
  * Periodic Hann, the STFT convention - `size`, not `size - 1`, in the denominator.

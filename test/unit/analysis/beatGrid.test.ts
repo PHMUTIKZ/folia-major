@@ -16,10 +16,15 @@ const { analyseBeatGrid, canRunBeatThis } = vi.hoisted(() => ({
     analyseBeatGrid: vi.fn(),
     canRunBeatThis: vi.fn(() => true),
 }));
-vi.mock('@/services/analysis/beatThis', () => ({ analyseBeatGrid, canRunBeatThis }));
+// The real spectrogram helpers, for the accents measured alongside small0's beats.
+vi.mock('@/services/analysis/beatThis', async () => ({
+    ...await vi.importActual<object>('@/services/analysis/beatThis'),
+    analyseBeatGrid,
+    canRunBeatThis,
+}));
 vi.mock('@/services/automix/analysisOffThread', () => ({ melSpectrogramOffThread: vi.fn(async () => ({ data: new Float32Array(0), frames: 0 })) }));
 
-const { readStoredBeatGrid, storeBeatGrid, getTrackBeatGrid } = await import('@/services/analysis/beatGrid');
+const { readStoredBeatGrid, storeBeatGrid, getTrackBeatGrid, getTrackBeatAccents } = await import('@/services/analysis/beatGrid');
 
 const GRID = { beats: [0.5, 1, 1.5, 2], downbeats: [0.5, 2] };
 const mid = () => Promise.resolve(new Float32Array(4));
@@ -99,10 +104,10 @@ describe('getTrackBeatGrid', () => {
         await storeBeatGrid('song-1', GRID);
         const SMALL = { beats: [0.6, 1.1], downbeats: [0.6] };
         analyseBeatGrid.mockResolvedValue(SMALL);
-        expect(await getTrackBeatGrid('song-1', mid, { model: 'beat_this_small' })).toEqual(SMALL);
+        expect(await getTrackBeatGrid('song-1', mid, { model: 'beat_this_small' })).toMatchObject(SMALL);
         expect(analyseBeatGrid).toHaveBeenCalledTimes(1);
         expect(await readStoredBeatGrid('song-1')).toEqual(GRID);
-        expect(await readStoredBeatGrid('song-1', 'beat_this_small')).toEqual(SMALL);
+        expect(await readStoredBeatGrid('song-1', 'beat_this_small')).toMatchObject(SMALL);
         expect([...store.keys()].sort()).toEqual(['beat_this_grid_song-1', 'beat_this_small_grid_song-1']);
     });
 
@@ -110,5 +115,54 @@ describe('getTrackBeatGrid', () => {
         analyseBeatGrid.mockResolvedValue(GRID);
         await getTrackBeatGrid('song-2', mid, { model: 'beat_this_small', cpuFallback: true });
         expect(analyseBeatGrid.mock.calls[0][1]).toEqual({ cpuFallback: false, model: 'beat_this_small' });
+    });
+});
+
+describe('beat accents', () => {
+    beforeEach(() => {
+        store.clear();
+        analyseBeatGrid.mockReset();
+        canRunBeatThis.mockReturnValue(true);
+    });
+
+    const copy = () => ({ beats: [...GRID.beats], downbeats: [...GRID.downbeats] });
+
+    it('measures and stores them with a small0 run, never with a final0 one', async () => {
+        analyseBeatGrid.mockImplementation(async () => copy());
+        const small = await getTrackBeatGrid('song-1', mid, { model: 'beat_this_small' });
+        expect(small?.accents?.impact).toHaveLength(GRID.beats.length);
+        expect((await readStoredBeatGrid('song-1', 'beat_this_small'))?.accents).toEqual(small?.accents);
+        const final = await getTrackBeatGrid('song-1', mid);
+        expect(final?.accents).toBeUndefined();
+        expect((store.get('beat_this_grid_song-1') as { accents?: unknown }).accents).toBeUndefined();
+    });
+
+    it('leaves off stored accents that do not fit the list, keeping the beats', async () => {
+        store.set('beat_this_small_grid_song-1', {
+            version: 1,
+            ...copy(),
+            accents: { v: 1, impact: [1], low: [1], mid: [0], high: [0], trackScale: 1 },
+        });
+        expect(await readStoredBeatGrid('song-1', 'beat_this_small')).toEqual(GRID);
+    });
+
+    it('fills them in for a list stored without, once per key', async () => {
+        await storeBeatGrid('song-1', copy(), 'beat_this_small');
+        const readMid = vi.fn(mid);
+        const [a, b] = await Promise.all([
+            getTrackBeatAccents('song-1', copy(), readMid),
+            getTrackBeatAccents('song-1', copy(), readMid),
+        ]);
+        expect(a).toBe(b);
+        expect(readMid).toHaveBeenCalledTimes(1);
+        expect((await readStoredBeatGrid('song-1', 'beat_this_small'))?.accents).toEqual(a);
+        expect(analyseBeatGrid).not.toHaveBeenCalled();
+    });
+
+    it('does not file accents against a list replaced meanwhile, or without the bytes', async () => {
+        await storeBeatGrid('song-1', { beats: [9, 10], downbeats: [9] }, 'beat_this_small');
+        expect(await getTrackBeatAccents('song-1', copy(), mid)).not.toBeNull();
+        expect((await readStoredBeatGrid('song-1', 'beat_this_small'))?.accents).toBeUndefined();
+        expect(await getTrackBeatAccents('song-2', copy(), async () => null)).toBeNull();
     });
 });
