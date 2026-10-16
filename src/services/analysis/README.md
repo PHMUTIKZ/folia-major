@@ -6,7 +6,7 @@
 
 | 文件 | 职责 |
 |---|---|
-| `trackAudio.ts` | 读一首歌**已经在本机**的字节：播放 representation → 媒体缓存 → 本地 URL → 本地文件句柄（App 注册的读取器）。从不下载在线歌曲（Navidrome 这类以 http 提供的曲库源会读，但会检查响应确实是音频）；要不要下载由调用方决定（只有 automix 的 profile 会）。另含按分析采样率解码、拆 mid/side。 |
+| `trackAudio.ts` | 读一首歌**已经在本机**的字节：播放 representation → 媒体缓存 → 本地 URL → 本地文件句柄（App 注册的读取器）。从不下载在线歌曲（Navidrome 这类以 http 提供的曲库源会读，但会检查响应确实是音频）；要不要下载由调用方决定（automix 的 profile 会；智能动感模式在在线歌还没进缓存时，用播放已解析出的这首歌的音源地址再读一份来分析，不写缓存，见 `services/beatFx/beatFxSource.ts`）。另含按分析采样率解码、拆 mid/side。 |
 | `beatThis.ts` | Beat This! 的前处理契约：梅尔频谱、1500 帧分块、峰值挑选、网格折算。推理先走 GPU，`cpuFallback` 决定能否退到 CPU（只有 final0 有 CPU 路径）。`model` 选模型：`beat_this`（final0，automix 用，需下载）或 `beat_this_small`（small0，智能动感模式用，随应用打包）。 |
 | `beatThisGpu.ts` + `beatThisWgsl/` | 渲染进程 Worker 里的 WebGPU 推理，两个模型共用同一套 kernel 和同一个 GPU device，Worker 里各加载一次、同时常驻，交替使用不重新加载；`probeBeatThisGpu` 给设置页判断有没有可用 GPU。 |
 | `beatGrid.ts` | 整首歌的拍点，按模型分开：先读存盘结果，正在跑就等同一次，否则跑一次并存盘（final0 存 `beat_this_grid_<分析 key>`，small0 存 `beat_this_small_grid_<分析 key>`，都归入「分析」缓存类别）。两个模型的结果互不读取、互不合并。只存整首；只读了开头的 automix 分析自己跑、不存。 |
