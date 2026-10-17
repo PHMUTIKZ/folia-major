@@ -498,6 +498,9 @@ function getWallpaperTargetBounds() {
 const windowsWallpaperMouse = createWindowsWallpaperMouseInjector({
   screen,
   getMainWindow: () => mainWindow,
+  // The helper coalesces moves onto a 16 ms timer (~26 reports a second), so a drag forwards the
+  // camera in visible steps. Interpolating keeps the wallpaper moving on every compositor frame.
+  interpolateMoves: true,
 });
 
 // Injects one helper mouse event into the main window's renderer.

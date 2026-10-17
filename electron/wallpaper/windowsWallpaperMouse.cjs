@@ -20,8 +20,29 @@ const WHEEL_PIXELS_PER_NOTCH = 100;
 const DOUBLE_CLICK_INTERVAL_MS = 500;
 const DOUBLE_CLICK_SLOP_DIP = 8;
 
+// The helper coalesces raw mouse moves onto a `MOUSE_MOVE_TIMER_MS` (16 ms) timer, which Windows
+// quantizes to ~31 ms on a stock timer resolution: forwarding each report verbatim moves the
+// wallpaper camera ~26 times a second no matter how fast the display refreshes, so on a 180 Hz
+// panel five frames out of six repeat the previous picture and a drag reads as stepping. The pump
+// below keeps the newest report and walks the remaining distance towards a velocity-extrapolated
+// target in small steps, letting Chromium coalesce them onto compositor frames.
+const MOVE_PUMP_INTERVAL_MS = 5;
+const MOVE_PUMP_APPROACH = 0.55;
+// A report is already up to one timer quantum old when it arrives; predicting that staleness away
+// is what turns "the camera follows the cursor, late" into "the camera is on the cursor".
+const MOVE_PUMP_LEAD_MS = 14;
+const MOVE_PUMP_MAX_PREDICT_MS = 40;
+const MOVE_PUMP_VELOCITY_DECAY = 0.8;
+const MOVE_PUMP_VELOCITY_BLEND = 0.7;
+const MOVE_PUMP_REST_SPEED = 0.02;
+
 function createWindowsWallpaperMouseInjector(options = {}) {
-  const { screen, getMainWindow, logWarn = console.warn.bind(console) } = options;
+  const {
+    screen,
+    getMainWindow,
+    logWarn = console.warn.bind(console),
+    interpolateMoves = false,
+  } = options;
 
   // Tracks the primary button between helper mousedown/mouseup reports: injected mouseMove events
   // carry no button state of their own, and Chromium derives MouseEvent.buttons from the
@@ -29,6 +50,14 @@ function createWindowsWallpaperMouseInjector(options = {}) {
   let primaryButtonHeld = false;
   let lastPrimaryDown = { at: 0, x: 0, y: 0 };
   let dipConversionWarned = false;
+
+  // Newest report, its smoothed velocity in DIP px per ms, and the position already injected.
+  // All three are window-relative DIP, i.e. the same space `sendInputEvent` takes.
+  let moveSample = null;
+  let moveVelocity = { x: 0, y: 0 };
+  let moveRendered = null;
+  let movePumpTimer = null;
+  let movePumpWindow = null;
 
   // Physical screen pixels → Chromium's DIP space. Falls back to the raw coordinates (the
   // pre-multi-monitor behaviour) when the platform conversion is unavailable, so mouse forwarding
@@ -66,6 +95,97 @@ function createWindowsWallpaperMouseInjector(options = {}) {
     };
   }
 
+  function injectMove(win, x, y) {
+    const moveEvent = { type: 'mouseMove', x, y };
+    if (primaryButtonHeld) {
+      moveEvent.modifiers = ['leftbuttondown'];
+    }
+    win.webContents.sendInputEvent(moveEvent);
+  }
+
+  function stopMovePump() {
+    if (movePumpTimer) {
+      clearInterval(movePumpTimer);
+      movePumpTimer = null;
+    }
+    movePumpWindow = null;
+  }
+
+  // Drops the drag's motion history. Called when the button goes down or up: a stale velocity from
+  // the previous drag would otherwise extrapolate the next one's first frame in the old direction.
+  function resetMovePump() {
+    stopMovePump();
+    moveSample = null;
+    moveRendered = null;
+    moveVelocity = { x: 0, y: 0 };
+  }
+
+  function recordMove(x, y) {
+    const at = Date.now();
+    if (moveSample) {
+      const dt = Math.max(1, at - moveSample.at);
+      moveVelocity = {
+        x: moveVelocity.x * (1 - MOVE_PUMP_VELOCITY_BLEND) + ((x - moveSample.x) / dt) * MOVE_PUMP_VELOCITY_BLEND,
+        y: moveVelocity.y * (1 - MOVE_PUMP_VELOCITY_BLEND) + ((y - moveSample.y) / dt) * MOVE_PUMP_VELOCITY_BLEND,
+      };
+    }
+    moveSample = { x, y, at };
+    if (!moveRendered) {
+      moveRendered = { x, y };
+    }
+  }
+
+  // Where the cursor should be now according to the newest report. The velocity bleeds while no
+  // new report arrives, so a stop converges on the last real sample instead of coasting past it.
+  function predictMove(now) {
+    const idleMs = Math.max(0, now - moveSample.at);
+    if (idleMs > 0) {
+      moveVelocity = {
+        x: moveVelocity.x * MOVE_PUMP_VELOCITY_DECAY,
+        y: moveVelocity.y * MOVE_PUMP_VELOCITY_DECAY,
+      };
+    }
+    const age = Math.min(idleMs + MOVE_PUMP_LEAD_MS, MOVE_PUMP_MAX_PREDICT_MS);
+    return {
+      x: moveSample.x + moveVelocity.x * age,
+      y: moveSample.y + moveVelocity.y * age,
+      settled: idleMs >= MOVE_PUMP_MAX_PREDICT_MS,
+    };
+  }
+
+  function pumpMove() {
+    const win = movePumpWindow;
+    if (!win || win.isDestroyed() || !moveSample) {
+      stopMovePump();
+      return;
+    }
+    const target = predictMove(Date.now());
+    const atRest =
+      target.settled && Math.abs(moveVelocity.x) + Math.abs(moveVelocity.y) <= MOVE_PUMP_REST_SPEED;
+    if (atRest) {
+      // Land exactly on the last real sample; the prediction stops here rather than short of it.
+      injectMove(win, moveSample.x, moveSample.y);
+      stopMovePump();
+      return;
+    }
+    moveRendered = {
+      x: moveRendered.x + (target.x - moveRendered.x) * MOVE_PUMP_APPROACH,
+      y: moveRendered.y + (target.y - moveRendered.y) * MOVE_PUMP_APPROACH,
+    };
+    injectMove(win, Math.round(moveRendered.x), Math.round(moveRendered.y));
+  }
+
+  function startMovePump(win) {
+    movePumpWindow = win;
+    if (movePumpTimer) {
+      return;
+    }
+    movePumpTimer = setInterval(pumpMove, MOVE_PUMP_INTERVAL_MS);
+    if (typeof movePumpTimer.unref === 'function') {
+      movePumpTimer.unref();
+    }
+  }
+
   // One helper mouse event. Coordinates are physical screen pixels; they are converted to
   // window-relative DIP and injected at the Chromium input-pipeline level.
   function forward(event) {
@@ -84,17 +204,19 @@ function createWindowsWallpaperMouseInjector(options = {}) {
         if (!inside) {
           return;
         }
-        const moveEvent = { type: 'mouseMove', x, y };
-        if (primaryButtonHeld) {
-          moveEvent.modifiers = ['leftbuttondown'];
+        if (!interpolateMoves) {
+          injectMove(win, x, y);
+          return;
         }
-        win.webContents.sendInputEvent(moveEvent);
+        recordMove(x, y);
+        startMovePump(win);
         return;
       }
       case 'mousedown': {
         if (!inside) {
           return;
         }
+        resetMovePump();
         primaryButtonHeld = true;
         // clickCount must be synthesized: injected events bypass the OS multi-click detection.
         const now = Date.now();
@@ -114,6 +236,7 @@ function createWindowsWallpaperMouseInjector(options = {}) {
         return;
       }
       case 'mouseup': {
+        resetMovePump();
         primaryButtonHeld = false;
         win.webContents.sendInputEvent({
           type: 'mouseUp',

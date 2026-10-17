@@ -1,5 +1,5 @@
 import { createRequire } from 'module';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // test/unit/electron/windowsWallpaperMouse.test.ts
 // Locks down the Windows wallpaper mouse injection: helper coordinates are *physical* screen
@@ -36,6 +36,7 @@ interface InjectorOptions {
   };
   getMainWindow: () => FakeWindow | null;
   logWarn?: (...args: unknown[]) => void;
+  interpolateMoves?: boolean;
 }
 
 interface FakeWindow {
@@ -50,7 +51,13 @@ interface Injector {
 
 // Secondary display to the right of a 100% primary, scaled to 150%: physical 1920..4480 maps to a
 // DIP window at x=1920 with a DIP width of 1707.
-function createHarness(options: { screenToDipPoint?: InjectorOptions['screen']['screenToDipPoint']; windowBounds?: Bounds } = {}) {
+function createHarness(
+  options: {
+    screenToDipPoint?: InjectorOptions['screen']['screenToDipPoint'];
+    windowBounds?: Bounds;
+    interpolateMoves?: boolean;
+  } = {},
+) {
   const events: InputEvent[] = [];
   const bounds = options.windowBounds ?? { x: 1920, y: 0, width: 1707, height: 960 };
   const window: FakeWindow = {
@@ -67,6 +74,7 @@ function createHarness(options: { screenToDipPoint?: InjectorOptions['screen']['
     screen: { screenToDipPoint: options.screenToDipPoint },
     getMainWindow: () => window,
     logWarn,
+    interpolateMoves: options.interpolateMoves,
   });
 
   return { injector, events, logWarn, bounds };
@@ -172,5 +180,87 @@ describe('windows wallpaper mouse injection', () => {
     injector.forward({ event: 'unknown', x: 2220, y: 300 });
 
     expect(events).toEqual([]);
+  });
+});
+
+describe('windows wallpaper mouse interpolation', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function dragHarness() {
+    return createHarness({ screenToDipPoint: scaledToDip, interpolateMoves: true });
+  }
+
+  it('defers the report to the pump instead of injecting it once', () => {
+    const { injector, events } = dragHarness();
+
+    injector.forward({ event: 'mousemove', x: 2220, y: 300 });
+    expect(events).toEqual([]);
+
+    vi.advanceTimersByTime(5);
+    expect(events).toEqual([{ type: 'mouseMove', x: 200, y: 200 }]);
+  });
+
+  it('fills the gap between two coalesced reports with intermediate positions', () => {
+    const { injector, events } = dragHarness();
+
+    injector.forward({ event: 'mousemove', x: 2220, y: 300 });
+    vi.advanceTimersByTime(5);
+    // The helper's next report arrives one timer quantum later, 80 DIP px further right.
+    vi.setSystemTime(31);
+    injector.forward({ event: 'mousemove', x: 2340, y: 300 });
+    vi.advanceTimersByTime(20);
+
+    const xs = events.map((event) => event.x);
+    expect(events.length).toBeGreaterThan(2);
+    // The first steps walk towards the new report instead of jumping once; the tail is the
+    // prediction settling back onto it, so only the approach is monotonic.
+    expect(xs.slice(0, 6)).toEqual([200, 258, 284, 296, 301, 303]);
+    expect(xs[xs.length - 1]).toBeGreaterThan(200);
+    expect(xs[xs.length - 1]).toBeLessThan(320);
+  });
+
+  it('keeps the pressed state on the interpolated moves', () => {
+    const { injector, events } = dragHarness();
+
+    injector.forward({ event: 'mousedown', x: 2220, y: 300 });
+    injector.forward({ event: 'mousemove', x: 2250, y: 300 });
+    vi.advanceTimersByTime(5);
+
+    expect(events[events.length - 1]).toEqual({ type: 'mouseMove', x: 220, y: 200, modifiers: ['leftbuttondown'] });
+  });
+
+  it('stops the pump on release', () => {
+    const { injector, events } = dragHarness();
+
+    injector.forward({ event: 'mousedown', x: 2220, y: 300 });
+    injector.forward({ event: 'mousemove', x: 2250, y: 300 });
+    vi.advanceTimersByTime(10);
+    injector.forward({ event: 'mouseup', x: 2250, y: 300 });
+
+    const afterRelease = events.length;
+    vi.advanceTimersByTime(500);
+
+    expect(events.length).toBe(afterRelease);
+  });
+
+  it('settles on the last report and then stops on its own', () => {
+    const { injector, events } = dragHarness();
+
+    injector.forward({ event: 'mousedown', x: 2220, y: 300 });
+    injector.forward({ event: 'mousemove', x: 2300, y: 300 });
+    vi.advanceTimersByTime(400);
+
+    const settled = events.filter((event) => event.type === 'mouseMove');
+    expect(settled[settled.length - 1]).toEqual({ type: 'mouseMove', x: 253, y: 200, modifiers: ['leftbuttondown'] });
+    const afterSettle = events.length;
+    vi.advanceTimersByTime(500);
+    expect(events.length).toBe(afterSettle);
   });
 });
